@@ -1,0 +1,345 @@
+import os
+import pandas as pd
+import numpy as np
+from itertools import cycle
+import hashlib
+
+def get_color(name, colors):
+    hash_value = int(hashlib.md5(name.encode()).hexdigest(), 16)
+    return colors[hash_value % len(colors)]
+
+SAMPLE_COLORS = ['red', 'blue', 'green', 'purple', 'orange']
+REFERENCE_COLORS = ['cyan', 'magenta', 'yellow', 'black', 'brown']
+
+# Read the reference list from the text file
+with open('references.txt', 'r') as file:
+    REFERENCES = [line.strip() for line in file]
+
+
+
+rule all:
+    input:
+        "updated_enhancers_sequences.csv",
+        "output_blast.csv",
+        "blast.bed",
+        "combined_enhancers.csv",
+        expand("{sample}_figurepeaks.bed", sample=[os.path.splitext(s)[0] for s in config["peaks"]]),
+        expand("{sample}.bw", sample=[os.path.splitext(s)[0] for s in config["peaks"]]),
+        expand("{sample}_sample_tracks.ini", sample=[os.path.splitext(s)[0] for s in config["peaks"]]),
+        expand("{reference}_reference_tracks.ini", reference=REFERENCES),
+        combined_tracks = "combined_tracks.ini",
+        individual_plots = directory("individual_plots"),
+        plot = "combined_plot.png",
+
+rule load_samtools_module:
+    shell:
+        """
+         set +u; source /etc/bashrc; set -u
+         module load samtools
+        """
+
+rule load_bedtools_module:
+    shell:
+        """
+         set +u; source /etc/bashrc; set -u
+         module load bedtools
+        """
+
+
+rule prepare_enhancers_bed:
+    input:
+        config["enhancer_file"]
+    output:
+        "enhancers.bed"
+    shell:
+        "tail -n +2 {input} | awk -F',' '{{print $1 \"\t\" $2 \"\t\" $3}}' > {output}"
+
+rule index_reference_genome:
+    input:
+        f"{config['env_dir']}/hg19.fa"
+    output:
+        "hg19.fa.fai"
+    shell:
+        """
+         set +u; source /etc/bashrc; set -u
+         module load samtools
+         samtools faidx {input}
+        """
+
+
+rule get_sequences:
+    input:
+        genome=f"{config['env_dir']}/hg19.fa",
+        bed="enhancers.bed"
+    output:
+        "enhancer_sequences.fa"
+    shell:
+        """
+         set +u; source /etc/bashrc; set -u
+         module load bedtools
+         bedtools getfasta -fi {input.genome} -bed {input.bed} -fo {output}
+        """
+
+rule update_sequences_csv:
+    input:
+        "enhancer_sequences.fa"
+    output:
+        "enhancer_sequences.csv"
+    shell:
+        """
+        awk 'BEGIN {{ print "chromosome,start,stop,sequence" }} \
+        {{ if (NR % 2 == 1) {{ gsub(">","",$0); split($0, arr, /[:-]/); chrom=arr[1]; start=arr[2]; stop=arr[3] }} \
+        else {{ print chrom","start","stop","$0 }} }}' {input} > {output}
+        """
+
+rule update_enhancers_csv:
+    input:
+        "enhancer_sequences.csv"
+    output:
+        "updated_enhancers_sequences.csv"
+    shell:
+        """
+        awk -F"," -v OFS="," 'NR>1{{ $4=toupper($4) }}1' {input} > {output}
+        """
+
+rule run_blastn:
+    input:
+        blast = f"{config['env_dir']}/ncbi-blast-2.14.0+/bin/blastn",
+        db_files = expand("{base}.{suffix}", base = f"{config['env_dir']}/mm39_db", suffix=["ndb", "nhr", "nin", "njs", "nog", "nos", "not", "nsq", "ntf", "nto"]),
+        query = "enhancer_sequences.fa"
+    output:
+        "output_blast.csv"
+    params:
+        db_base = f"{config['env_dir']}/mm39_db"
+    shell:
+        "{input.blast} -query {input.query} -db {params.db_base} -out {output} -outfmt '10 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore' -word_size 16 -reward 1 -penalty -1 -gapopen 5 -gapextend 2  -dust yes -soft_masking false -perc_identity 75"
+
+
+
+
+headers = "qseqid,sseqid,pident,length,mismatch,gapopen,qstart,qend,sstart,send,evalue,bitscore"
+
+
+rule add_headers:
+    input:
+        "output_blast.csv"
+    output:
+        "output_blast_with_headers.csv"
+    shell:
+        """
+        echo "{headers}" | cat - {input} > {output}
+        """
+
+rule filter_output:
+    input:
+        "output_blast_with_headers.csv"
+    output:
+        "filtered_output_blast.csv"
+    shell:
+        """
+        awk -F, 'NR==1 || $4 > 80' {input} > {output}
+        """
+
+rule update_filtered_output:
+    input:
+        "filtered_output_blast.csv"
+    output:
+        "updated_filtered_output_blast.csv"
+    shell:
+        """
+        awk -F, 'BEGIN{{OFS=FS}} NR==1{{print; next}} !seen[$1] || $3 > maxpident[$1] {{maxpident[$1]=$3; row[$1]=$0}} END{{for (qseqid in row) print row[qseqid]}}' {input} > {output}
+        """
+
+rule update_updated_filtered_output:
+    input:
+        "updated_filtered_output_blast.csv"
+    output:
+        "updated_updated_filtered_output_blast.csv"
+    shell:
+        """
+        awk -F, 'BEGIN{{OFS=","}} NR==1{{print "qseqid_chromosome", "qseqid_start", "qseqid_stop", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore"; next}} {{split($1, parts, /[:-]/); printf "%s,%s,%s", parts[1], parts[2], parts[3]; for (i=2; i<=NF; i++) printf ",%s", $i; print ""}}' {input} > {output}
+        """
+
+rule convert_to_bed:
+    input:
+        "updated_updated_filtered_output_blast.csv"
+    output:
+        "blast.bed"
+    shell:
+        """
+        awk -F, 'BEGIN{{OFS="\t"}} NR>1{{print $1, $2, $3}}' {input} > {output}
+        """
+    
+rule intersect:
+    input:
+        peaks = lambda wildcards: "{sample}.bed".format(sample=wildcards.sample), # Change here
+        blast = "blast.bed",
+        refseq = f"{config['env_dir']}/hg19.ncbiRefSeq.gtf"
+    output:
+        "{sample}_intersected_peaks.csv"
+    shell:
+        """
+        set +u; source /etc/bashrc; set -u
+        module load bedtools
+        bedtools intersect -a {input.peaks} -b {input.blast} -wa -wb > {wildcards.sample}_intersected_peaks.bed
+        bedtools intersect -a {wildcards.sample}_intersected_peaks.bed -b {input.refseq} -loj > {wildcards.sample}_annotated_intersected_peaks.bed
+        awk 'BEGIN{{OFS=","; print "peak_chromosome", "peak_start", "peak_end", "peak_name", "score", "strand", "coverage_1", "coverage_2", "coverage_3", "coverage_4", "enhancer_chromosome", "enhancer_start", "enhancer_end"}} {{print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13}}' {wildcards.sample}_intersected_peaks.bed > {output}
+        """
+rule process_enhancers:
+    input:
+        ["{sample}_intersected_peaks.csv".format(sample=os.path.splitext(s)[0]) for s in config["peaks"]]
+    output:
+        "combined_enhancers.csv"
+    shell:
+        """
+        
+        python khushi.py {input}
+        """
+rule generate_figurepeaks_bed:
+    input:
+        csv_file="{sample}_intersected_peaks.csv"
+    output:
+        bed_file="{sample}_figurepeaks.bed"
+    shell:
+        """
+        awk -F',' 'NR>1{{print $1 \"\t\" $2 \"\t\" $3 \"\t\" $4}}' {input.csv_file} > {output.bed_file}
+        """
+        
+rule generate_figurepeaks_bigwig:
+    input:
+        bed_file="{sample}_figurepeaks.bed",
+        sizes = f"{config['env_dir']}/hg19.chrom.sizes",
+        converter = f"{config['env_dir']}/bedGraphToBigWig"
+    output:
+        bigwig_file="{sample}.bw"
+    shell:
+        """
+        bedtools genomecov -i {input.bed_file} -bg -g {input.sizes} > {wildcards.sample}.bedgraph
+        {input.converter} {wildcards.sample}.bedgraph {input.sizes} {output.bigwig_file}
+        """
+
+
+rule generate_sample_tracks_ini:
+    input:
+        bigwig="{sample}.bw"
+    output:
+        ini="{sample}_sample_tracks.ini"
+    params:
+        color=lambda wildcards: get_color(wildcards.sample, SAMPLE_COLORS)  # Use hash of sample name to choose color
+    run:
+        color = params.color
+        title = os.path.splitext(os.path.basename(input.bigwig))[0]
+        with open(output.ini, 'w') as file:
+            file.write(f"""[bigwig signal]
+file = {input.bigwig}
+height = 5
+title = "{title}"
+color = {color}
+number_of_bins = 500
+nans_to_zeros = True
+summary_method = mean
+show_data_range = True
+file_type = bigwig
+""")
+
+
+rule generate_reference_track_ini:
+    input:
+        bigwig = "{reference}.bw"
+    output:
+        ini = "{reference}_reference_tracks.ini"
+    params:
+        color = lambda wildcards: REFERENCE_COLORS[REFERENCES.index(wildcards.reference) % len(REFERENCE_COLORS)]
+    run:
+        color = params.color
+        title = os.path.splitext(os.path.basename(input.bigwig))[0]
+        with open(output.ini, 'w') as file:
+            file.write(f"""[bigwig signal]
+file = {input.bigwig}
+height = 5
+title = "{title}"
+color = {color}
+number_of_bins = 500
+nans_to_zeros = True
+summary_method = mean
+show_data_range = True
+file_type = bigwig
+""")
+
+rule combine_tracks:
+    input:
+        sample_tracks = expand("{sample}_sample_tracks.ini", sample=[os.path.splitext(s)[0] for s in config["peaks"]]),
+        reference_tracks = expand("{reference}_reference_tracks.ini", reference=REFERENCES)
+    output:
+        combined_tracks = "combined_tracks.ini"
+    shell:
+        """
+        echo "[x-axis]" > {output.combined_tracks}
+        echo "fontsize=12" >> {output.combined_tracks}
+        echo "" >> {output.combined_tracks}
+        echo "[spacer]" >> {output.combined_tracks}
+        echo "height = 0.5" >> {output.combined_tracks}
+        echo "" >> {output.combined_tracks}
+        echo "[genes]" >> {output.combined_tracks}
+        echo "file = {config[env_dir]}/hg19.ncbiRefSeq.gtf" >> {output.combined_tracks}
+        echo "height = 3" >> {output.combined_tracks}
+        echo "title = \"Gene structure\"" >> {output.combined_tracks}
+        echo "fontsize = 10" >> {output.combined_tracks}
+        echo "" >> {output.combined_tracks}
+        for fname in {input.sample_tracks} {input.reference_tracks}; do
+            echo "[spacer]" >> {output.combined_tracks}
+            echo "height = 0.5" >> {output.combined_tracks}
+            echo "" >> {output.combined_tracks}
+            cat $fname >> {output.combined_tracks}
+        done
+       
+        """
+rule generate_pygenometracks_individual:
+    input:
+        ini = "combined_tracks.ini",
+        csv = "combined_enhancers.csv"
+    output:
+        plots = directory("individual_plots")
+    params:
+        genome = "hg19"
+    run:
+        # Read the csv file
+        df = pd.read_csv(input.csv)
+
+        # Iterate over each row in the DataFrame
+        for idx, row in df.iterrows():
+            # Get the chromosome, start, and stop for this row
+            chrom = row['enhancer_chromosome']
+            start = row['enhancer_start']
+            stop = row['enhancer_end']
+
+            # Form the region string
+            region = f"{chrom}:{start}-{stop}"
+
+            # Generate the output plot file name for this row
+            output_plot = f"{chrom}_{start}-{stop}.png"
+
+            # Run pyGenomeTracks with the formed region string for this row
+            shell(f"pyGenomeTracks --tracks {input.ini} --region {region} --outFileName {output.plots}/{output_plot} --fontSize 12")
+
+
+rule generate_pygenometracks:
+    input:
+        ini = "combined_tracks.ini",
+        csv = "combined_enhancers.csv"
+    output:
+        plot = "combined_plot.png"
+    
+    run:
+        # Read the csv file and extract the first chromosome, min start, and max end
+        df = pd.read_csv(input.csv)
+        chrom = df['enhancer_chromosome'].values[0]
+        min_start = np.floor(df['enhancer_start'].min() / 1e6) * 1e6  # rounding down to nearest million
+        max_end = np.ceil(df['enhancer_end'].max() / 1e6) * 1e6  # rounding up to nearest million
+        region = f"{chrom}:{int(min_start)}-{int(max_end)}"
+
+        # Execute the command
+        shell(f"""
+        pyGenomeTracks --tracks {input.ini} --region {region} --width 40 --dpi 300 --outFileName {output.plot}
+        """)
+
