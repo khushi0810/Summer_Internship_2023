@@ -8,10 +8,10 @@ Mentors : Dr.Deborah Lang , Dr.Stephen Moore , Dr. Chao Zhang
 
 *  Code : Contains the scripts for the pipeline
     - hic.py - Generates a csv file for enhancers from 3DIV 
-    - environment.py - For setting up the environment. which downloads the files that are needed for snakemake to run
+    - environment.py - For setting up the environment, it downloads the files that are needed for snakemake to run
     - selector.py - Takes input a text file from the user with different parameters
     - Snakamake files - Conatins bash commands for the pipeline depending upon users input
-    - khushi.py - for letting know the snakemkae files if there are multiple inputs for peaks or just a single input
+    - khushi.py - for letting know the snakemake files if there are multiple inputs for peaks or just a single input
     - qwe.py - Generating combined csv file when there is one input for peaks
     - rty.py - Generating combined csv file when there are multiple inputs for peaks
     - references.txt - For histone enhancer markers
