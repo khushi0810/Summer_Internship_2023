@@ -7,7 +7,7 @@ Mentors : Dr.Deborah Lang , Dr.Stephen Moore , Dr. Chao Zhang
 *  Manual: Contains the steps for using the pipeline 
 
 *  Code : Contains the scripts for the pipeline
-    - hic.py - Generates a csv file for enhncaers from 3DIV 
+    - hic.py - Generates a csv file for enhancers from 3DIV 
     - environment.py - For setting up the environment. which downloads the files that are needed for snakemake to run
     - selector.py - Takes input a text file from the user with different parameters
     - Snakamake files - Conatins bash commands for the pipeline depending upon users input
